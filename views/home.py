@@ -1,9 +1,39 @@
 import html
 import streamlit as st
 import database
+import place_detail
 
 # Clean list of mood strings without icons
 MOODS = ["Nature", "Photography", "Adventure", "Romantic", "Family"]
+
+
+def _render_place_card(place):
+    """Render one card plus an invisible full-cover button on top of it
+    (see the CSS rule for div[data-testid='column']:has(article.glass-card)
+    in styles.css) so tapping anywhere on the card opens the detail view."""
+    image = html.escape(
+        place.get("image_url") or "https://images.unsplash.com/photo-1567157577867-05ccb1388e66?auto=format&fit=crop&w=900&q=80",
+        quote=True,
+    )
+    st.markdown(
+        f"<article class='glass-card'>"
+        f"<img src='{image}' alt='' style='height:190px;object-fit:cover;width:100%'>"
+        f"<div class='place-copy'>"
+        f"<span class='place-tag'>{html.escape(place.get('category', 'LOCAL FIND')).upper()}</span>"
+        f"<h3 class='place-title'>{html.escape(place.get('place_name', 'Untitled place'))}</h3>"
+        f"<div class='place-meta'>{html.escape(place.get('area', 'Mumbai'))} · {html.escape(place.get('best_time', 'Any time'))}</div>"
+        f"<p>{html.escape(place.get('description', ''))}</p>"
+        f"</div>"
+        f"</article>",
+        unsafe_allow_html=True,
+    )
+    if st.button(
+        place.get("place_name", "View place"),
+        key=f"place_card_{place['id']}",
+    ):
+        st.session_state.selected_place_id = place["id"]
+        st.rerun()
+
 
 def render_page():
     # Initialize default selected_mood to prevent KeyError
@@ -61,17 +91,9 @@ def render_page():
     for row in range(0, len(places), 3):
         for column, place in zip(st.columns(3), places[row:row+3]):
             with column:
-                image = html.escape(place.get("image_url") or "https://images.unsplash.com/photo-1567157577867-05ccb1388e66?auto=format&fit=crop&w=900&q=80", quote=True)
-                st.markdown(
-                    f"<article class='glass-card'>"
-                    f"<img src='{image}' alt='' style='height:190px;object-fit:cover;width:100%'>"
-                    f"<div class='place-copy'>"
-                    f"<span class='place-tag'>{html.escape(place.get('category','LOCAL FIND')).upper()}</span>"
-                    f"<h3 class='place-title'>{html.escape(place.get('place_name','Untitled place'))}</h3>"
-                    f"<div class='place-meta'>{html.escape(place.get('area','Mumbai'))} · {html.escape(place.get('best_time','Any time'))}</div>"
-                    f"<p>{html.escape(place.get('description',''))}</p>"
-                    f"</div>"
-                    f"</article>", 
-                    unsafe_allow_html=True
-                )
+                _render_place_card(place)
         st.markdown("<div class='card-row-gap'></div>", unsafe_allow_html=True)
+
+    # A card was tapped -> render the popup on top of everything above,
+    # instead of replacing the page.
+    place_detail.render_selected_place_modal()

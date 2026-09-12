@@ -2,6 +2,7 @@ import html
 import streamlit as st
 
 import database
+import place_detail
 
 REGIONS = [
     "Aarey","Airoli","Ambernath","Andheri East","Andheri West","Arnala","virar","Badlapur","Bandra / Worli",
@@ -39,3 +40,15 @@ def render_page():
                         <p>{html.escape(place.get('description',''))}</p>
                     </div>
                 </article>""", unsafe_allow_html=True)
+                # Invisible full-cover button stacked on top of the card
+                # (see div[data-testid="column"]:has(.map-place-card) in
+                # styles.css) so tapping anywhere on it opens the detail popup.
+                if st.button(
+                    place.get("place_name", "View place"),
+                    key=f"map_place_card_{place['id']}",
+                ):
+                    st.session_state.selected_place_id = place["id"]
+                    st.rerun()
+
+    # A card was tapped -> render the popup on top of everything above.
+    place_detail.render_selected_place_modal()
