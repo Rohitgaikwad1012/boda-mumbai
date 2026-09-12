@@ -306,9 +306,14 @@ div[data-testid="column"]:has(article.map-place-card) div[data-testid="stButton"
     inset: 0;
     margin: auto;
     z-index: 9999;
-    background: rgba(26,27,26,.25); /* --panel at 25% opacity — 75% see-through */
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
+
+    /* Fully opaque modal */
+    background: #1a1b1a !important;
+
+    /* No transparency from the modal itself */
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+
     border: 1px solid var(--line);
     border-radius: 20px;
     width: min(560px, 92vw);
