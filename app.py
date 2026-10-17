@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import quote
 import base64
 
 import streamlit as st
@@ -18,22 +19,40 @@ def load_asset(name: str) -> str:
     return (Path(__file__).parent / "assets" / name).read_text(encoding="utf-8")
 
 
+_IMAGE_EXTS = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".webp": "webp"}
+
+
 @st.cache_data
 def build_hero_photo_css() -> str:
-    """Read every image in assets/hero, embed it as base64, and emit one
-    CSS class per photo (.hero-photo-1, .hero-photo-2, ...). Embedding the
-    bytes directly means the browser never makes a network request for
-    these images, so hotlink protection on the original source can't
-    break anything. Cached so Streamlit doesn't re-read + re-encode all
-    17 files on every rerun/interaction in production."""
+    """Emit one CSS class per hero photo (.hero-photo-1, .hero-photo-2, ...).
+
+    Fast path: if Streamlit static serving is on and static/hero/ exists
+    (create it with optimize_hero_images.py), each class just points at a
+    small cacheable file. Browsers only download a background image once an
+    element with that class actually exists, so photos 2..N load lazily as
+    the crossfade reaches them instead of all being shipped up front.
+
+    Fallback: the old behaviour (base64 inside the CSS), so nothing breaks
+    if the static folder or the config setting isn't in place yet.
+    """
+    static_dir = Path(__file__).parent / "static" / "hero"
+    if st.get_option("server.enableStaticServing") and static_dir.is_dir():
+        rules = []
+        for index, path in enumerate(sorted(static_dir.iterdir()), start=1):
+            if path.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            rules.append(
+                f".hero-photo-{index} {{ background-image: url(/app/static/hero/{quote(path.name)}); }}"
+            )
+        if rules:
+            return "\n".join(rules)
+
     hero_dir = Path(__file__).parent / "assets" / "hero"
     if not hero_dir.is_dir():
         return ""
-
-    ext_to_mime = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".webp": "webp"}
     rules = []
     for index, path in enumerate(sorted(hero_dir.iterdir()), start=1):
-        mime = ext_to_mime.get(path.suffix.lower())
+        mime = _IMAGE_EXTS.get(path.suffix.lower())
         if mime is None:
             continue
         encoded = base64.b64encode(path.read_bytes()).decode("utf-8")

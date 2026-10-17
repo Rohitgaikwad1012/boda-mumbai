@@ -1,72 +1,88 @@
 import mysql.connector
-from mysql.connector import pooling
+import streamlit as st
 import config
 
 
-# MySQL connection pool
-try:
-    db_pool = mysql.connector.pooling.MySQLConnectionPool(
-        pool_name="bodapool",
-        pool_size=10,
-        pool_reset_session=True,
-        host=config.MYSQL_HOST,
-        port=config.MYSQL_PORT,
-        user=config.MYSQL_USER,
-        password=config.MYSQL_PASSWORD,
-        database=config.MYSQL_DATABASE
-    )
-except mysql.connector.Error as err:
-    print(f"Error creating connection pool: {err}")
-    db_pool = None
+# Why there is no connection pool any more:
+# A pooled connection can be silently dropped by the network while it sits
+# idle (Aiven, Wi-Fi, laptop sleep). Pinging it, or returning it to the pool
+# (which resets the session), then waits on a dead socket with no timeout.
+# That wait is the "page is faded and stuck, cards never come" problem.
+# A short-lived connection per query cannot go stale, and connection_timeout
+# makes a bad connect fail fast instead of hanging.
+_DB_CONFIG = dict(
+    host=config.MYSQL_HOST,
+    port=config.MYSQL_PORT,
+    user=config.MYSQL_USER,
+    password=config.MYSQL_PASSWORD,
+    database=config.MYSQL_DATABASE,
+    connection_timeout=10,
+)
+
+# Also stop a query from waiting forever on a dead socket. Older versions of
+# the connector do not know these two options, so we fall back without them.
+_IO_TIMEOUTS = dict(read_timeout=20, write_timeout=20)
+
+
+def _safe_close(obj):
+    """Close a cursor/connection without letting a dead socket raise."""
+    if obj is None:
+        return
+    try:
+        obj.close()
+    except Exception:
+        pass
 
 
 def get_connection():
-    """Get a MySQL connection from the pool."""
-    if db_pool:
-        return db_pool.get_connection()
-
-    return mysql.connector.connect(
-        host=config.MYSQL_HOST,
-        port=config.MYSQL_PORT,
-        user=config.MYSQL_USER,
-        password=config.MYSQL_PASSWORD,
-        database=config.MYSQL_DATABASE
-    )
+    """Open a fresh MySQL connection (fails within about 10 seconds)."""
+    try:
+        return mysql.connector.connect(**_DB_CONFIG, **_IO_TIMEOUTS)
+    except AttributeError:
+        # This connector version does not support read/write timeouts.
+        return mysql.connector.connect(**_DB_CONFIG)
 
 
 def execute_query(query, params=(), fetch=False):
-    """Execute SQL query safely and always return the connection to the pool."""
+    """Run one SQL query and always close the connection afterwards.
 
-    conn = None
-    cursor = None
+    If it fails, try once more on a new connection. Reads are safe to
+    repeat. A write is only retried if it failed before anything was sent,
+    so it can never be saved twice. Returns None if both tries fail.
+    """
 
-    try:
-        conn = get_connection()
-        cursor = conn.cursor(dictionary=True)
+    for attempt in (1, 2):
+        conn = None
+        cursor = None
+        sent = False
 
-        cursor.execute(query, params)
+        try:
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
 
-        if fetch:
-            return cursor.fetchall()
+            sent = True
+            cursor.execute(query, params)
 
-        conn.commit()
-        return cursor.lastrowid
+            if fetch:
+                return cursor.fetchall()
 
-    except mysql.connector.Error as e:
-        print(f"Database Exception: {e}")
-        return None
+            conn.commit()
+            return cursor.lastrowid
 
-    finally:
-        if cursor:
-            cursor.close()
+        except (mysql.connector.Error, OSError) as e:
+            print(f"Database Exception (attempt {attempt}): {e}")
+            if attempt == 2 or (sent and not fetch):
+                return None
 
-        if conn:
-            conn.close()
+        finally:
+            _safe_close(cursor)
+            _safe_close(conn)
+
+    return None
 
 
-def find_places(category=None, area=None):
-    """Fetch places filtered by category or area."""
-
+@st.cache_data(ttl=300, show_spinner=False)
+def _find_places_cached(category, area):
     clauses = []
     values = []
 
@@ -80,11 +96,28 @@ def find_places(category=None, area=None):
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    return execute_query(
+    rows = execute_query(
         f"SELECT * FROM places{where} LIMIT 24",
         tuple(values),
         fetch=True
     )
+    if rows is None:
+        # Raising means Streamlit does NOT cache the failure, so the next
+        # click or refresh tries the database again.
+        raise RuntimeError("database unavailable")
+    return rows
+
+
+def find_places(category=None, area=None):
+    """Fetch places filtered by category or area.
+
+    Good results are cached for 5 minutes, so switching moods is instant and
+    the database is hit much less. Returns None if the database is down.
+    """
+    try:
+        return _find_places_cached(category, area)
+    except RuntimeError:
+        return None
 
 
 def create_preference(name, area, budget, mood, group_type, duration):

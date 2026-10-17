@@ -10,6 +10,184 @@ import streamlit as st
 import database
 import gemini_service
 
+
+def _query_box_html(query_text):
+    return f"""
+    <div style="
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 12px 18px;
+        margin: 15px 0 25px 0;
+        color: #ffffff;
+        font-size: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    ">
+        <span style="
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: rgba(163, 230, 53, 0.15);
+            color: #a3e635;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            flex-shrink: 0;
+        ">YOU</span>
+        <div><strong>  </strong> {html.escape(query_text)}</div>
+    </div>
+    """
+
+
+def _loading_box_html():
+    return """
+    <style>
+    @keyframes bodaDotPulse { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+    .boda-loading-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #a3e635; animation: bodaDotPulse 1.2s infinite ease-in-out; }
+    .boda-loading-dot:nth-child(2) { animation-delay: 0.2s; }
+    .boda-loading-dot:nth-child(3) { animation-delay: 0.4s; }
+    </style>
+    <div style="
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        background: linear-gradient(135deg, rgba(163, 230, 53, 0.08), rgba(255, 255, 255, 0.03));
+        border: 1px solid rgba(163, 230, 53, 0.25);
+        border-left: 3px solid #a3e635;
+        border-radius: 14px;
+        padding: 18px 24px;
+        margin: 0 0 25px 0;
+    ">
+        <span style="
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: #a3e635;
+            color: #0f0f14;
+            font-weight: 800;
+            font-size: 1rem;
+            flex-shrink: 0;
+        ">B</span>
+        <div style="color: #ffffff; font-size: 1.05rem;">
+            Finding places and planning your route
+            <span style="margin-left: 8px;"><span class="boda-loading-dot"></span><span class="boda-loading-dot"></span><span class="boda-loading-dot"></span></span>
+        </div>
+    </div>
+    """
+
+
+def _search_places_for_query(user_chat_input):
+    # Clean search input and tokenize keywords
+    clean_input = re.sub(r'[^a-zA-Z\s]', ' ', user_chat_input)
+    raw_words = [w.strip().lower() for w in clean_input.split() if len(w.strip()) > 2]
+
+    stop_words = {"have", "hrs", "hours", "in", "the", "for", "with", "and", "near", "find"}
+    keywords = [w for w in raw_words if w not in stop_words]
+
+    db_context_places = []
+    if keywords:
+        conditions = []
+        params = []
+        for word in keywords:
+            conditions.append("(LOWER(TRIM(area)) LIKE %s OR LOWER(TRIM(place_name)) LIKE %s OR LOWER(TRIM(category)) LIKE %s)")
+            pattern = f"%{word}%"
+            params.extend([pattern, pattern, pattern])
+
+        where_clause = " OR ".join(conditions)
+        sql_query = f"SELECT * FROM places WHERE {where_clause} ORDER BY RAND() LIMIT 15"
+        db_context_places = database.execute_query(sql_query, tuple(params), fetch=True) or []
+
+    # Fallback broad search
+    if not db_context_places:
+        db_context_places = database.execute_query(
+            "SELECT * FROM places WHERE LOWER(area) LIKE %s ORDER BY RAND() LIMIT 5",
+            (f"%{user_chat_input.strip().lower()}%",),
+            fetch=True
+        ) or []
+
+    return db_context_places
+
+
+def _plan_trip_in_background():
+    """Plans the trip WITHOUT blocking the page switch.
+
+    pending_stage 1 : the page was just opened. Draw the question + a loading
+                      card and return, so the page switch is instant.
+    pending_stage 2 : the fragment timer fired. Do the slow work (database +
+                      Gemini), save the result, then rerun the whole app.
+
+    IMPORTANT: stage 2 must not call any st.* function before the work is
+    finished. If it did, a queued timer rerun could interrupt it and the
+    trip would be planned twice.
+    """
+    query = st.session_state.get("pending_query")
+    stage = st.session_state.get("pending_stage", 0)
+    if not query or not stage:
+        return
+
+    if stage == 1:
+        st.markdown(_query_box_html(query), unsafe_allow_html=True)
+        st.markdown(_loading_box_html(), unsafe_allow_html=True)
+        st.session_state["pending_stage"] = 2
+        return
+
+    # ---- stage 2: the slow work ----
+    st.session_state["pending_stage"] = 3  # nothing can start it a second time
+    weather_state = st.session_state.get("weather_state", "Sunny")
+    current_uid = st.session_state.get("user_id", 1) or 1
+
+    ai_response = None
+    db_context_places = []
+    error_message = None
+
+    # Log query to analytics
+    try:
+        database.execute_query(
+            "INSERT INTO search_history (user_id, search_query) VALUES (%s, %s)",
+            (current_uid, query)
+        )
+    except Exception:
+        pass
+
+    try:
+        db_context_places = _search_places_for_query(query)
+        ai_response = gemini_service.generate_ai_itinerary(
+            query,
+            db_context_places,
+            current_weather=weather_state
+        )
+    except Exception as e:
+        error_text = str(e)
+        if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
+            error_message = "⚠️ Your Gemini API free trial limit is over for today. Please try again tomorrow."
+        else:
+            error_message = "Something went wrong while planning your trip. Please try again."
+        ai_response = None
+
+    st.session_state["active_query"] = query
+    if ai_response is not None:
+        st.session_state["active_response"] = ai_response
+        st.session_state["active_db_places"] = db_context_places
+    else:
+        # Don't leave a stale/broken result behind.
+        st.session_state.pop("active_response", None)
+        st.session_state.pop("active_db_places", None)
+    if error_message:
+        st.session_state["ai_error"] = error_message
+
+    st.session_state.pop("pending_query", None)
+    st.session_state["pending_stage"] = 0
+    st.rerun()  # inside a fragment this reruns the whole app, so the result shows
+
+
 def render_page():
     # --- GLOBAL FONT: Poppins applied across the whole app (questions, answers, everything) ---
     st.markdown("""
@@ -34,6 +212,9 @@ def render_page():
                 st.session_state["current_page"] = "Discover Mumbai"
                 if "active_response" in st.session_state:
                     del st.session_state["active_response"]
+                st.session_state.pop("pending_query", None)
+                st.session_state["pending_stage"] = 0
+                st.session_state.pop("ai_error", None)
                 st.rerun()
 
     st.markdown("<hr style='border:0; border-top:1px solid rgba(255,255,255,0.08); margin:15px 0 25px 0;' />", unsafe_allow_html=True)
@@ -44,83 +225,42 @@ def render_page():
     
     weather_state = st.selectbox(
         "🌤️ Current Weather", 
-        ["Sunny", "Rainy / Heavy Monsoons", "Overcast Dusk"]
+        ["Sunny", "Rainy / Heavy Monsoons", "Overcast Dusk"],
+        key="weather_state"
     )
-
-    current_uid = st.session_state.get("user_id", 1) or 1
 
     # Check query params for submissions from our custom HTML bar
     query_params = st.query_params
     submitted_query = query_params.get("boda_query", None)
 
-    # Process search query from custom HTML input
-    if submitted_query:
-        # Clear query param to prevent infinite refresh loops
-        st.query_params.clear()
-        
-        user_chat_input = submitted_query
+    # The place popup ("Ask BODA for a plan") queues its question here.
+    queued_query = st.session_state.pop("queued_boda_query", None)
 
-        # Log query to analytics
-        try:
-            database.execute_query(
-                "INSERT INTO search_history (user_id, search_query) VALUES (%s, %s)", 
-                (current_uid, user_chat_input)
-            )
-        except Exception:
-            pass
+    new_query = submitted_query or queued_query
+    if new_query:
+        if submitted_query:
+            # Clear query param to prevent infinite refresh loops
+            st.query_params.clear()
 
-        # Clean search input and tokenize keywords
-        clean_input = re.sub(r'[^a-zA-Z\s]', ' ', user_chat_input)
-        raw_words = [w.strip().lower() for w in clean_input.split() if len(w.strip()) > 2]
-        
-        stop_words = {"have", "hrs", "hours", "in", "the", "for", "with", "and", "near", "find"}
-        keywords = [w for w in raw_words if w not in stop_words]
+        # Only remember the question here. The slow part (database + Gemini)
+        # runs in the background step below, so this page opens instantly.
+        st.session_state["pending_query"] = new_query
+        st.session_state["pending_stage"] = 1
+        st.session_state.pop("active_response", None)
+        st.session_state.pop("active_query", None)
+        st.session_state.pop("active_db_places", None)
+        st.session_state.pop("ai_error", None)
 
-        db_context_places = []
-        if keywords:
-            conditions = []
-            params = []
-            for word in keywords:
-                conditions.append("(LOWER(TRIM(area)) LIKE %s OR LOWER(TRIM(place_name)) LIKE %s OR LOWER(TRIM(category)) LIKE %s)")
-                pattern = f"%{word}%"
-                params.extend([pattern, pattern, pattern])
-            
-            where_clause = " OR ".join(conditions)
-            sql_query = f"SELECT * FROM places WHERE {where_clause} ORDER BY RAND() LIMIT 15"
-            db_context_places = database.execute_query(sql_query, tuple(params), fetch=True) or []
-
-        # Fallback broad search
-        if not db_context_places:
-            db_context_places = database.execute_query(
-                "SELECT * FROM places WHERE LOWER(area) LIKE %s ORDER BY RAND() LIMIT 5",
-                (f"%{user_chat_input.strip().lower()}%",),
-                fetch=True
-            ) or []
-
-        with st.spinner("Finding places and planning your route..."):
-            try:
-                ai_response = gemini_service.generate_ai_itinerary(
-                    user_chat_input, 
-                    db_context_places, 
-                    current_weather=weather_state
-                )
-            except Exception as e:
-                error_text = str(e)
-                if "RESOURCE_EXHAUSTED" in error_text or "429" in error_text:
-                    st.error("⚠️ Your Gemini API free trial limit is over for today. Please try again tomorrow.")
-                else:
-                    st.error("Something went wrong while planning your trip. Please try again.")
-                ai_response = None
-
-        st.session_state.active_query = user_chat_input
-        if ai_response is not None:
-            st.session_state.active_response = ai_response
-            st.session_state.active_db_places = db_context_places
+    if st.session_state.get("pending_stage", 0):
+        if hasattr(st, "fragment"):
+            st.fragment(run_every=0.15)(_plan_trip_in_background)()
         else:
-            # Don't overwrite a previous good result with a failed one —
-            # just clear it so nothing stale/broken renders below.
-            st.session_state.pop("active_response", None)
-            st.session_state.pop("active_db_places", None)
+            # Very old Streamlit without fragments: plan inline (slower).
+            st.session_state["pending_stage"] = 2
+            _plan_trip_in_background()
+
+    if st.session_state.get("ai_error"):
+        st.error(st.session_state["ai_error"])
 
     # RENDER STORED RESULT ON PAGE
     if "active_response" in st.session_state and st.session_state.active_response:
@@ -128,36 +268,7 @@ def render_page():
         ai_response = st.session_state.active_response
         db_context_places = st.session_state.active_db_places
 
-        st.markdown(f"""
-        <div style="
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 12px 18px;
-            margin: 15px 0 25px 0;
-            color: #ffffff;
-            font-size: 1rem;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        ">
-            <span style="
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 26px;
-                height: 26px;
-                border-radius: 50%;
-                background: rgba(163, 230, 53, 0.15);
-                color: #a3e635;
-                font-size: 0.75rem;
-                font-weight: 700;
-                letter-spacing: 0.5px;
-                flex-shrink: 0;
-            ">YOU</span>
-            <div><strong>  </strong> {html.escape(query_text)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(_query_box_html(query_text), unsafe_allow_html=True)
 
         # Off-topic query (math, trivia, code, etc.) — show the fixed decline
         # message only, skip cards/itinerary/food/budget entirely.

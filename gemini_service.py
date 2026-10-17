@@ -106,8 +106,8 @@ _DEVELOPER_RE = re.compile(
     r"who is your (developer|creator|father))\b",
     re.IGNORECASE,
 )
-_ROHIT_RE = re.compile(r"\brohit(\s+gaikwad)?\b", re.IGNORECASE)
-_HARSH_RE = re.compile(r"\bharsh(\s+lodat)?\b", re.IGNORECASE)
+_ROHIT_RE = re.compile(r"\bRohit(\s+Gaikwad)?\b", re.IGNORECASE)
+_HARSH_RE = re.compile(r"\bHarsh(\s+Lodat)?\b", re.IGNORECASE)
 
 
 def check_scripted_response(user_query):

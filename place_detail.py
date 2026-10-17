@@ -67,8 +67,11 @@ def render_place_modal(place):
                 st.button(" Location not available", disabled=True, use_container_width=True)
         with action_col2:
             if st.button(" Ask BODA for a plan", key="ask_boda_about_place", type="primary", use_container_width=True):
-                st.query_params["boda_query"] = f"Tell me about {place.get('place_name', '')} in {place.get('area', '')} and suggest a plan around it"
-                st.query_params["page"] = "assistant"
+                # Switch page straight through session state (no query-param
+                # round trip). assistant.py picks this up, shows the page
+                # right away, and plans the trip in the background.
+                st.session_state["queued_boda_query"] = f"Tell me about {place.get('place_name', '')} in {place.get('area', '')} and suggest a plan around it"
+                st.session_state["current_page"] = "Ask BODA"
                 st.session_state.pop("selected_place_id", None)
                 st.rerun()
 
