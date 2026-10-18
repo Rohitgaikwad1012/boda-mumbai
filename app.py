@@ -42,7 +42,7 @@ def build_hero_photo_css() -> str:
             if path.suffix.lower() not in _IMAGE_EXTS:
                 continue
             rules.append(
-                f".hero-photo-{index} {{ background-image: url(/app/static/hero/{quote(path.name)}); }}"
+                f".hero-photo-{index} {{ background-image: url(app/static/hero/{quote(path.name)}); }}"
             )
         if rules:
             return "\n".join(rules)
