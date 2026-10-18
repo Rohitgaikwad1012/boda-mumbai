@@ -31,10 +31,34 @@ document.addEventListener("DOMContentLoaded", () => {
    watching for that. So instead we use a MutationObserver that keeps
    watching indefinitely and re-initializes rotation every time a fresh
    .hero node shows up. */
-const HERO_PHOTO_COUNT = 17; // update this if you add/remove files in assets/hero
+// The real photo count is now read automatically from the .hero-photo-N CSS
+// classes that app.py generates (one per file in static/hero). This number is
+// only a backup in case that detection fails.
+const HERO_PHOTO_COUNT_FALLBACK = 24;
 const HERO_SWAP_MS = 5200;   // how long each photo stays fully visible before crossfading
 
 let heroRotationIntervalId = null;
+
+function countHeroPhotos(hostDoc) {
+  let highest = 0;
+  try {
+    for (const sheet of Array.from(hostDoc.styleSheets)) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (e) {
+        continue; // stylesheet from another site: cannot be read, skip it
+      }
+      for (const rule of Array.from(rules)) {
+        const match = /^\.hero-photo-(\d+)$/.exec((rule.selectorText || "").trim());
+        if (match) highest = Math.max(highest, parseInt(match[1], 10));
+      }
+    }
+  } catch (e) {
+    console.warn("[BODA hero] could not count hero photos:", e);
+  }
+  return highest || HERO_PHOTO_COUNT_FALLBACK;
+}
 
 function getHostDocument() {
   try {
@@ -65,7 +89,9 @@ function initHero(hostDoc, heroElement) {
     heroRotationIntervalId = null;
   }
 
-  if (HERO_PHOTO_COUNT < 1) return;
+  const photoCount = countHeroPhotos(hostDoc);
+  console.log("[BODA hero] photos found:", photoCount);
+  if (photoCount < 1) return;
 
   const layerA = hostDoc.createElement("div");
   const layerB = hostDoc.createElement("div");
@@ -89,12 +115,12 @@ function initHero(hostDoc, heroElement) {
     incoming.classList.add("is-active");
     outgoing.classList.remove("is-active");
     activeLayer = activeLayer === 0 ? 1 : 0;
-    photoIndex = (photoIndex + 1) % HERO_PHOTO_COUNT;
+    photoIndex = (photoIndex + 1) % photoCount;
   }
 
   showNext(); // first photo
   console.log("[BODA hero] layers inserted and rotation started");
-  if (HERO_PHOTO_COUNT > 1) {
+  if (photoCount > 1) {
     heroRotationIntervalId = setInterval(showNext, HERO_SWAP_MS);
   }
 }
